@@ -1,0 +1,13 @@
+# Keep LF line endings in the working tree on every platform. The Makefile
+# and the Rak examples must not contain CRLF, otherwise the Linux build
+# breaks ("missing separator") and the Rak parser sees stray carriage
+# returns.
+* text=auto eol=lf
+
+# Build artefacts.
+*.dll binary
+*.so binary
+*.exe binary
+*.o binary
+*.obj binary
+*.a binary

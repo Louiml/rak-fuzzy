@@ -1,0 +1,116 @@
+// rak-fuzzy: hash files with the native CTPH implementation.
+//
+//   rakc run examples/hash_file.rak [file] [second file] [library]
+//
+// Everything the shared library produces is written into a buffer that Rak
+// allocated with ffi_alloc. Rak therefore knows the length of that buffer,
+// can bounds check every access to it and can read the result back with
+// ffi_cstr_to_string - no ffi_trust needed and no foreign pointer ever
+// escapes into the script.
+//
+// FFI note (a limitation of the Rak FFI layer, worked around here):
+//   lib.call() always returns the raw 64 bit register of the callee. A C
+//   function that returns an `int` leaves its result in the low 32 bits,
+//   zero extended, so a negative error code arrives in Rak as 4294967295
+//   instead of -1. c_int() converts the raw value back into a signed 32 bit
+//   integer. The declarative `extern "C"` form has the same quirk for
+//   `-> i32`; declaring `-> i64` avoids it.
+//
+// Another FFI note: a top level `return` does not stop a Rak script, so the
+// example is written with if/else instead of early returns.
+
+/// Reinterpret the raw return value of lib.call() as a signed 32 bit int.
+fn c_int(v: i64) -> i64 {
+    if v >= 2147483648 { return v - 4294967296 }
+    return v
+}
+
+/// Locate the shared library next to the script or in the build directory.
+fn find_library() -> string {
+    let candidates = [
+        "./rak_fuzzy.dll",
+        "./librak_fuzzy.so",
+        "./build/rak_fuzzy.dll",
+        "./build/librak_fuzzy.so",
+        "../build/rak_fuzzy.dll",
+        "../build/librak_fuzzy.so",
+    ]
+    for candidate in candidates {
+        if file_exists(candidate) { return candidate }
+    }
+    return "./rak_fuzzy.dll"
+}
+
+// args() returns the whole process command line: [program, script, arg1, ...].
+// It is used instead of argv() because argv() only exists on the interpreter.
+let args = args()
+let out_cap = 256
+
+let mut target = "README.md"
+if len(args) > 2 { target = args[2] }
+
+let mut other = ""
+if len(args) > 3 { other = args[3] }
+
+let mut lib_path = find_library()
+if len(args) > 4 { lib_path = args[4] }
+
+if !file_exists(target) {
+    dump fmt("rak-fuzzy: no such file: {}", target)
+} else {
+    let lib = ffi_load(lib_path)
+
+    // Rak owns the output buffer, so the library may never write past its end.
+    let out = ffi_alloc(out_cap)
+
+    let rc = c_int(lib.call("rf_hash_file", [target, out, out_cap]))
+    if rc != 0 {
+        dump fmt("rak-fuzzy: rf_hash_file failed with {}", rc)
+    } else {
+        let hash = ffi_cstr_to_string(out)
+        dump fmt("{}  ->  {}", target, hash)
+
+        // A hash of the same file is always identical to itself.
+        let score = c_int(lib.call("rf_compare", [hash, hash]))
+        dump fmt("similarity of {} with itself: {}", target, score)
+
+        if other != "" && file_exists(other) {
+            let out2 = ffi_alloc(out_cap)
+            let rc2 = c_int(lib.call("rf_hash_file", [other, out2, out_cap]))
+            if rc2 != 0 {
+                dump fmt("rak-fuzzy: rf_hash_file failed with {}", rc2)
+            } else {
+                let hash2 = ffi_cstr_to_string(out2)
+                dump fmt("{}  ->  {}", other, hash2)
+                let score2 = c_int(lib.call("rf_compare", [hash, hash2]))
+                dump fmt("similarity {} <-> {}: {}", target, other, score2)
+
+                // A cited finding: the report carries tool, target and timestamp.
+                let finding = cite(fmt("{} and {} are {}% similar (fuzzy hash)",
+                                       target, other, score2),
+                                   "rak-fuzzy", target)
+                dump report(finding)
+            }
+            ffi_free(out2)
+        }
+
+        // The TLSH-style digest is a separate algorithm and is exposed
+        // separately. It needs the raw bytes, so the file is read into
+        // memory here; the CTPH path above streams the file from disk and
+        // never holds it in memory.
+        let size = file_size(target)
+        if size > 0 && size < 4194304 {
+            let mut bytes = file_read_bytes(target)
+            let tlsh = ffi_alloc(64)
+            let rc3 = c_int(lib.call("rf_tlsh_buffer", [bytes, len(bytes), tlsh, 64]))
+            if rc3 == 0 {
+                dump fmt("tlsh: {}", ffi_cstr_to_string(tlsh))
+            } else {
+                dump fmt("rak-fuzzy: rf_tlsh_buffer failed with {}", rc3)
+            }
+            ffi_free(tlsh)
+        }
+    }
+
+    ffi_free(out)
+}

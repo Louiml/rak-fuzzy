@@ -1,0 +1,123 @@
+// rak-fuzzy: cluster the files of a directory by fuzzy hash similarity.
+//
+//   rakc run examples/cluster_dir.rak [directory] [threshold] [library]
+//
+// Every file in the directory is hashed with the native CTPH implementation
+// (streamed from disk, the file is never held in memory), the hashes are
+// clustered with the union-find based single linkage clusterer and the
+// resulting groups are printed with provenance.
+//
+// The findings are wrapped in cite() and finished with report(), so every
+// group carries the tool that produced it, the target it was produced from
+// and the time it was produced.
+//
+// FFI note (a limitation of the Rak FFI layer, worked around here):
+//   lib.call() always returns the raw 64 bit register of the callee. A C
+//   function that returns an `int` leaves its result in the low 32 bits,
+//   zero extended, so a negative error code arrives in Rak as 4294967295
+//   instead of -1. c_int() converts the raw value back into a signed 32 bit
+//   integer. The declarative `extern "C"` form has the same quirk for
+//   `-> i32`; declaring `-> i64` avoids it.
+
+/// Reinterpret the raw return value of lib.call() as a signed 32 bit int.
+fn c_int(v: i64) -> i64 {
+    if v >= 2147483648 { return v - 4294967296 }
+    return v
+}
+
+/// Locate the shared library next to the script or in the build directory.
+fn find_library() -> string {
+    let candidates = [
+        "./rak_fuzzy.dll",
+        "./librak_fuzzy.so",
+        "./build/rak_fuzzy.dll",
+        "./build/librak_fuzzy.so",
+        "../build/rak_fuzzy.dll",
+        "../build/librak_fuzzy.so",
+    ]
+    for candidate in candidates {
+        if file_exists(candidate) { return candidate }
+    }
+    return "./rak_fuzzy.dll"
+}
+
+// args() returns the whole process command line: [program, script, arg1, ...].
+// It is used instead of argv() because argv() only exists on the interpreter.
+let args = args()
+let out_cap = 256
+
+let mut dir = "."
+if len(args) > 2 { dir = args[2] }
+
+let mut threshold = 40
+if len(args) > 3 { threshold = int(args[3]) }
+
+let mut lib_path = find_library()
+if len(args) > 4 { lib_path = args[4] }
+
+if !file_exists(dir) {
+    dump fmt("rak-fuzzy: no such directory: {}", dir)
+} else {
+    let lib = ffi_load(lib_path)
+    let out = ffi_alloc(out_cap)
+
+    // --- hash every file in the directory ---------------------------------
+    let mut paths = []
+    let mut hashes = []
+    for name in file_list(dir) {
+        let path = dir + "/" + name
+        if file_exists(path) {
+            let rc = c_int(lib.call("rf_hash_file", [path, out, out_cap]))
+            if rc == 0 {
+                paths = push(paths, path)
+                hashes = push(hashes, ffi_cstr_to_string(out))
+            }
+        }
+    }
+    let n = len(hashes)
+    dump fmt("{} file(s) hashed in {}", n, dir)
+
+    if n == 0 {
+        dump "nothing to cluster"
+    } else {
+        // --- cluster ------------------------------------------------------
+        // The cluster ids are written into a Rak owned buffer as little
+        // endian int32, which is exactly what ffi_read_i32 expects.
+        let ids = ffi_alloc(n * 4)
+        let joined = join("\n", hashes)
+        let rc = c_int(lib.call("rf_cluster", [joined, n, threshold, ids]))
+        if rc != 0 {
+            dump fmt("rak-fuzzy: rf_cluster failed with {}", rc)
+        } else {
+            let mut groups = {}
+            let mut order = []
+            for i in 0..(n - 1) {
+                let id = ffi_read_i32(ids, i * 4)
+                let key = fmt("{}", id)
+                if !contains(groups, key) {
+                    groups[key] = []
+                    order = push(order, id)
+                }
+                groups[key] = push(groups[key], paths[i])
+            }
+
+            // --- report the groups with provenance -------------------------
+            let mut summary = ""
+            for id in order {
+                let key = fmt("{}", id)
+                let members = groups[key]
+                let line = fmt("cluster {}: {} file(s): {}", id, len(members),
+                               join(", ", members))
+                let finding = cite(line, "rak-fuzzy", dir)
+                dump fmt("{}", line)
+                dump provenance(finding)
+                summary = summary + line + "\n"
+            }
+            let report_finding = cite(summary, "rak-fuzzy", dir)
+            dump report(report_finding)
+        }
+        ffi_free(ids)
+    }
+
+    ffi_free(out)
+}

@@ -1,0 +1,10 @@
+build/
+build-asan/
+build-cmake/
+build-cmake-linux/
+*.o
+*.obj
+*.exe
+*.so
+*.dll
+*.a
