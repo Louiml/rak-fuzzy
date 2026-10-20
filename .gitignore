@@ -1,7 +1,6 @@
-build/
-build-asan/
-build-cmake/
-build-cmake-linux/
+# Build directories (any name, e.g. build/, build-asan/, build-linux/).
+build*/
+
 *.o
 *.obj
 *.exe
